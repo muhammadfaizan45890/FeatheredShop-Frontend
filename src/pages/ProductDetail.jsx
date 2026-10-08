@@ -806,9 +806,30 @@ const ImageGallery = memo(function ImageGallery({ images = [], name = "" }) {
     return () => cancelAnimationFrame(raf);
   }, [index, multi, playing, hovering, zoomOpen, count]);
 
+  /* ✅ SAFE thumbnail auto-centering.
+     Uses scrollLeft math instead of scrollIntoView so it CANNOT
+     climb to the page container and yank the user to the top. */
   useEffect(() => {
-    const el = railRef.current?.children?.[index];
-    el?.scrollIntoView?.({ block: "nearest", inline: "nearest", behavior: reduceMotion ? "auto" : "smooth" });
+    const rail = railRef.current;
+    if (!rail) return;
+    const el = rail.children?.[index];
+    if (!el) return;
+    const isVertical = rail.scrollHeight > rail.clientHeight + 1 && rail.clientWidth <= rail.clientHeight;
+    if (isVertical) {
+      const target = el.offsetTop - rail.clientHeight / 2 + el.clientHeight / 2;
+      const max = rail.scrollHeight - rail.clientHeight;
+      const clamped = Math.max(0, Math.min(target, max));
+      if (Math.abs(rail.scrollTop - clamped) > 1) {
+        rail.scrollTo({ top: clamped, behavior: reduceMotion ? "auto" : "smooth" });
+      }
+    } else {
+      const target = el.offsetLeft - rail.clientWidth / 2 + el.clientWidth / 2;
+      const max = rail.scrollWidth - rail.clientWidth;
+      const clamped = Math.max(0, Math.min(target, max));
+      if (Math.abs(rail.scrollLeft - clamped) > 1) {
+        rail.scrollTo({ left: clamped, behavior: reduceMotion ? "auto" : "smooth" });
+      }
+    }
   }, [index, reduceMotion]);
 
   useEffect(() => {
@@ -1598,12 +1619,15 @@ const ProductDetail = () => {
   const sizeRef = useRef(null);
   const tabsRef = useRef(null);
 
-  /* ✅ Tracks whether the scroll-to-top should fire.
-     It only fires on the very first load for a given product identifier,
-     OR when the user navigates to a different product.
-     Background refreshes (visibilitychange, focus, cart update, bfcache)
-     do NOT scroll the page. */
+  /* ✅ Tracks which product identifier we've already scrolled-to-top for.
+     Only scrolls once per identifier — background refreshes never scroll. */
   const scrolledForRef = useRef(null);
+
+  /* ✅ Throttle ref for background refreshes so mobile URL-bar
+     show/hide (which fires visibilitychange + focus rapidly) can't
+     trigger a fetch storm and re-render on every scroll tick. */
+  const lastRefreshRef = useRef(0);
+  const REFRESH_THROTTLE_MS = 30000;
 
   const [comments, setComments] = useState([]);
   const [commentText, setCommentText] = useState("");
@@ -1615,19 +1639,27 @@ const ProductDetail = () => {
   const [commentFilter, setCommentFilter] = useState("all");
   const [visibleReviews, setVisibleReviews] = useState(5);
 
+  /* ✅ Centralised "safe refresh" — throttled, so fast visibility/focus
+     flapping on mobile scroll never fires more than once per 30s. */
+  const requestRefresh = useCallback(() => {
+    const now = Date.now();
+    if (now - lastRefreshRef.current < REFRESH_THROTTLE_MS) return;
+    lastRefreshRef.current = now;
+    setRetryKey((k) => k + 1);
+  }, []);
+
   /* ─── Cart migration + auth-time cart merge ────────── */
   useEffect(() => {
     migrateLegacyCart();
-    /* If user is already logged in, merge any leftover guest cart */
     mergeLocalCartIntoServer();
   }, []);
 
-  /* ✅ Refresh product when the tab regains focus (post-purchase, back button)
-     NOTE: These background refreshes do NOT scroll the page anymore. */
+  /* ✅ Refresh product when the tab regains focus (post-purchase, back button).
+     Throttled so mobile scroll URL-bar flapping cannot cause a fetch loop. */
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState === "visible") {
-        setRetryKey((k) => k + 1);
+        requestRefresh();
       }
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -1636,20 +1668,23 @@ const ProductDetail = () => {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, []);
+  }, [requestRefresh]);
 
   /* ✅ Refresh when navigating back to this page (bfcache restore) */
   useEffect(() => {
     const onPageShow = (e) => {
-      if (e.persisted) setRetryKey((k) => k + 1);
+      if (e.persisted) requestRefresh();
     };
     window.addEventListener("pageshow", onPageShow);
     return () => window.removeEventListener("pageshow", onPageShow);
-  }, []);
+  }, [requestRefresh]);
 
   /* ✅ Refresh when the cart is modified in another tab or after checkout */
   useEffect(() => {
-    const onCartUpdate = () => setRetryKey((k) => k + 1);
+    const onCartUpdate = () => {
+      lastRefreshRef.current = 0; /* force-through the throttle for this real event */
+      setRetryKey((k) => k + 1);
+    };
     window.addEventListener("feathered:cart:update", onCartUpdate);
     return () =>
       window.removeEventListener("feathered:cart:update", onCartUpdate);
@@ -1680,10 +1715,8 @@ const ProductDetail = () => {
         setQuantity(1);
         setActiveTab("description");
 
-        /* ✅ Only scroll to top when the *product identifier* changes.
-           This prevents background refreshes (visibilitychange, focus,
-           cart:update, bfcache) from yanking the user back to the top
-           while they're scrolling. */
+        /* ✅ Only scroll to top when the *identifier* changes.
+           Background refreshes NEVER scroll. */
         if (scrolledForRef.current !== identifier) {
           scrolledForRef.current = identifier;
           window.scrollTo({ top: 0, behavior: "auto" });
@@ -1962,13 +1995,11 @@ const ProductDetail = () => {
     haptic(15);
 
     try {
-      /* 1️⃣ Always write to localStorage — works for guests, keeps Navbar in sync */
       addToCartStorage(product, selectedSize, quantity);
-
-      /* 2️⃣ If logged in, also push to server (fire-and-forget safe) */
       await addToCartServer(product, selectedSize, quantity);
 
-      /* 2️⃣b Refresh product so the stock badge updates instantly */
+      /* force-through the throttle since this is a real stock change */
+      lastRefreshRef.current = 0;
       setRetryKey((k) => k + 1);
 
       trackEvent("add_to_cart", {
