@@ -1,3 +1,3 @@
-const API = "http://localhost:8000";
+const API = "https://featheredshop.up.railway.app";
 
 export default API;
