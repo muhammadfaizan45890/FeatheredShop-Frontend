@@ -6,7 +6,6 @@ import { ArrowRight, ArrowDown, Footprints } from "lucide-react";
 import {
   motion,
   useScroll,
-  useTransform,
   useReducedMotion,
   AnimatePresence,
 } from "framer-motion";
@@ -129,7 +128,7 @@ const HERO_HEIGHT_CLASSES =
   "h-[clamp(460px,78svh,860px)] min-h-[460px] sm:h-[clamp(500px,74svh,820px)] lg:h-[clamp(540px,76vh,860px)]";
 
 /* ─────────────────────────────────────────────────────────────
- * HD TEXT CSS
+ * HD TEXT CSS + STILL IMAGE CSS
  * ───────────────────────────────────────────────────────────── */
 const HD_CSS = `
   .hero-hd-root {
@@ -155,6 +154,44 @@ const HD_CSS = `
   }
   .hero-hd-num { font-variant-numeric: tabular-nums; }
   .hero-safe-bottom { padding-bottom: max(0.75rem, env(safe-area-inset-bottom)); }
+
+  /* Still, full-bleed image layer */
+  .hero-img-layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: #0A0A0A;
+  }
+  .hero-img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center center;
+    /* Prevent any accidental transform-based motion */
+    transform: none !important;
+    will-change: opacity;
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+    image-rendering: -webkit-optimize-contrast;
+  }
+  /* Blur-up placeholder that sits under the real image */
+  .hero-img-blur {
+    position: absolute;
+    inset: -8%;
+    width: 116%;
+    height: 116%;
+    object-fit: cover;
+    object-position: center center;
+    filter: blur(24px) saturate(1.1);
+    opacity: 0.9;
+    transform: none !important;
+    pointer-events: none;
+  }
+
   @keyframes hero-scroll-hint {
     0% { transform: translateY(-100%); opacity: 0; }
     40% { opacity: 1; }
@@ -167,24 +204,27 @@ const HD_CSS = `
 `;
 
 /* ─────────────────────────────────────────────────────────────
- * Motion variants (direction-aware)
+ * Motion variants (direction-aware, no fade on content)
  * ───────────────────────────────────────────────────────────── */
 const makeContentVariants = (dir, reduce) => ({
-  hidden: { opacity: 0 },
+  hidden: { opacity: 1 },
   visible: {
     opacity: 1,
-    transition: { duration: 0.45, staggerChildren: reduce ? 0 : 0.09, delayChildren: 0.12 },
+    transition: {
+      duration: 0.4,
+      staggerChildren: reduce ? 0 : 0.08,
+      delayChildren: 0.08,
+    },
   },
-  exit: { opacity: 0, transition: { duration: 0.22 } },
+  exit: { opacity: 1, transition: { duration: 0.18 } },
 });
 
 const makeItemVariants = (dir, reduce) => ({
-  hidden: { opacity: 0, x: reduce ? 0 : dir * 28, y: reduce ? 0 : 14 },
+  hidden: { x: reduce ? 0 : dir * 26, y: reduce ? 0 : 10 },
   visible: {
-    opacity: 1,
     x: 0,
     y: 0,
-    transition: { duration: 0.65, ease: [0.22, 1, 0.36, 1] },
+    transition: { duration: 0.6, ease: [0.22, 1, 0.36, 1] },
   },
 });
 
@@ -233,6 +273,7 @@ const Hero = () => {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
   const [isTabHidden, setIsTabHidden] = useState(false);
+  const [imgLoadedMap, setImgLoadedMap] = useState({});
   const navigate = useNavigate();
   const reduceMotion = useReducedMotion();
 
@@ -245,14 +286,11 @@ const Hero = () => {
 
   const totalSlides = slides.length;
 
-  // Parallax (disabled for reduced motion)
+  // Scroll progress kept only for the ScrollHint fade behavior of the content wrapper
   const { scrollYProgress } = useScroll({
     target: containerRef,
     offset: ["start start", "end start"],
   });
-  const imageY = useTransform(scrollYProgress, [0, 1], ["0%", reduceMotion ? "0%" : "18%"]);
-  const contentY = useTransform(scrollYProgress, [0, 1], ["0%", reduceMotion ? "0%" : "26%"]);
-  const fade = useTransform(scrollYProgress, [0, 0.85], [1, 0]);
 
   // ─── Fetch slides ──────────────────────────────────
   useEffect(() => {
@@ -331,7 +369,7 @@ const Hero = () => {
     return () => io.disconnect();
   }, [totalSlides, loading]);
 
-  // ─── Auto-play + progress (single rAF loop, no re-render per frame) ──
+  // ─── Auto-play + progress (single rAF loop) ────────
   useEffect(() => {
     if (totalSlides <= 1) return;
     const paused = isPaused || isTabHidden || !inView;
@@ -447,6 +485,7 @@ const Hero = () => {
   const dir = directionRef.current;
   const contentVariants = makeContentVariants(dir, reduceMotion);
   const itemVariants = makeItemVariants(dir, reduceMotion);
+  const imgLoaded = !!imgLoadedMap[slideKey];
 
   return (
     <section
@@ -465,35 +504,46 @@ const Hero = () => {
       <style>{HD_CSS}</style>
       <span ref={liveRegionRef} className="sr-only" aria-live="polite" />
 
-      {/* ─── Background image (parallax + slow zoom) ───── */}
-      <motion.div
-        aria-hidden="true"
-        style={{ y: imageY }}
-        className="absolute inset-x-0 top-0 w-full h-[118%]"
-      >
-        <AnimatePresence initial={false}>
+      {/* ─── STILL, FULL-BLEED IMAGE (no parallax, no zoom, no scale) ─── */}
+      <div className="hero-img-layer" aria-hidden="true">
+        {/* Blur-up placeholder using current slide image */}
+        {activeSlide.image && !imgLoaded && (
+          <img
+            src={activeSlide.image}
+            alt=""
+            aria-hidden="true"
+            className="hero-img-blur"
+            draggable={false}
+          />
+        )}
+
+        <AnimatePresence initial={false} mode="sync">
           <motion.img
             key={slideKey}
-            src={activeSlide.image}
+            src={activeSlide.image || FALLBACK_IMG}
             alt=""
             fetchpriority="high"
             loading="eager"
             decoding="async"
             draggable={false}
-            initial={{ opacity: 0, scale: reduceMotion ? 1 : 1.08 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, transition: { duration: 0.8 } }}
-            transition={{
-              opacity: { duration: 0.8, ease: "easeOut" },
-              scale: { duration: (SLIDE_DURATION + 1500) / 1000, ease: "linear" },
-            }}
-            className="absolute inset-0 w-full h-full object-cover object-center"
+            referrerPolicy="no-referrer"
+            onLoad={() =>
+              setImgLoadedMap((prev) => ({ ...prev, [slideKey]: true }))
+            }
             onError={(e) => {
-              if (e.currentTarget.src !== FALLBACK_IMG) e.currentTarget.src = FALLBACK_IMG;
+              if (e.currentTarget.src !== FALLBACK_IMG) {
+                e.currentTarget.src = FALLBACK_IMG;
+              }
+              setImgLoadedMap((prev) => ({ ...prev, [slideKey]: true }));
             }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ opacity: { duration: 0.45, ease: "easeOut" } }}
+            className="hero-img"
           />
         </AnimatePresence>
-      </motion.div>
+      </div>
 
       {/* ─── Gradient overlays ─────────────────────────── */}
       <div
@@ -521,9 +571,9 @@ const Hero = () => {
         }}
       />
 
-      {/* ─── Content (draggable for swipe) ─────────────── */}
+      {/* ─── Content (draggable for swipe) — NO fade ───── */}
       <div className="relative h-full w-full max-w-7xl mx-auto px-5 sm:px-8 lg:px-10 pt-14 pb-20 sm:pt-16 sm:pb-24 flex items-center">
-        <motion.div style={{ y: contentY, opacity: fade }} className="w-full max-w-2xl">
+        <div className="w-full max-w-2xl">
           <motion.div
             drag={totalSlides > 1 ? "x" : false}
             dragConstraints={{ left: 0, right: 0 }}
@@ -608,7 +658,7 @@ const Hero = () => {
               </motion.div>
             </AnimatePresence>
           </motion.div>
-        </motion.div>
+        </div>
       </div>
 
       {/* ─── Slide counter ─────────────────────────────── */}
